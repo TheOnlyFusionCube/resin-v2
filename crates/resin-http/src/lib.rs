@@ -15,9 +15,11 @@ use std::{
 };
 
 use axum::{
-    Router,
-    extract::DefaultBodyLimit,
-    http::{HeaderMap, StatusCode},
+    Json, Router,
+    extract::{DefaultBodyLimit, Request, State},
+    http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -33,12 +35,14 @@ pub use protocol::{
 
 pub const EVENT_QUEUE_CAPACITY: usize = 64;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RouteConfig {
     pub enable_openai: bool,
     pub enable_anthropic: bool,
     pub enable_demo: bool,
     pub routed_dp_size: usize,
+    /// When set, `/v1/*` requires `Authorization: Bearer <key>` or `x-api-key: <key>`.
+    pub api_key: Option<Arc<str>>,
 }
 
 impl Default for RouteConfig {
@@ -48,6 +52,7 @@ impl Default for RouteConfig {
             enable_anthropic: true,
             enable_demo: true,
             routed_dp_size: 1,
+            api_key: None,
         }
     }
 }
@@ -101,7 +106,22 @@ pub fn router(
         next_id: Arc::new(AtomicU64::new(1)),
         routed_dp_size: routes.routed_dp_size,
     };
-    let mut router = Router::new().route("/health", get(openai::health));
+    let mut api = Router::new();
+    if routes.enable_openai {
+        api = api
+            .route("/v1/models", get(openai::models))
+            .route("/v1/chat/completions", post(openai::chat_completions))
+            .route("/v1/responses", post(openai::responses));
+    }
+    if routes.enable_anthropic {
+        api = api.route("/v1/messages", post(anthropic::messages));
+    }
+    if let Some(key) = routes.api_key {
+        api = api.route_layer(middleware::from_fn_with_state(key, require_api_key));
+    }
+    let mut router = Router::new()
+        .route("/health", get(openai::health))
+        .merge(api);
     if let Some(metrics) = metrics {
         router = router.route(
             "/metrics",
@@ -113,15 +133,6 @@ pub fn router(
     }
     if routes.enable_demo {
         router = router.route("/", get(openai::index));
-    }
-    if routes.enable_openai {
-        router = router
-            .route("/v1/models", get(openai::models))
-            .route("/v1/chat/completions", post(openai::chat_completions))
-            .route("/v1/responses", post(openai::responses));
-    }
-    if routes.enable_anthropic {
-        router = router.route("/v1/messages", post(anthropic::messages));
     }
     router
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
@@ -135,10 +146,65 @@ pub async fn serve(
     routes: RouteConfig,
     metrics: Option<MetricsEndpoint>,
 ) -> std::io::Result<()> {
-    serve_with_shutdown(listener, model, jobs, routes, metrics, async {
+    serve_with_shutdown(listener, model, jobs, routes, metrics, shutdown_signal()).await
+}
+
+/// Resolve on Ctrl-C or, on Unix, SIGTERM, the signal container runtimes send
+/// before killing a process.
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    _ = terminate.recv() => {},
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
         let _ = tokio::signal::ctrl_c().await;
-    })
-    .await
+    }
+}
+
+async fn require_api_key(State(key): State<Arc<str>>, request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+        });
+    if presented.is_some_and(|presented| constant_time_eq(presented.as_bytes(), key.as_bytes())) {
+        return next.run(request).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        Json(protocol::json_error(
+            "invalid or missing API key",
+            "authentication_error",
+        )),
+    )
+        .into_response()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && std::hint::black_box(
+            left.iter()
+                .zip(right)
+                .fold(0u8, |acc, (left, right)| acc | (left ^ right)),
+        ) == 0
 }
 
 /// Stop accepting connections when requested and bound the time spent draining

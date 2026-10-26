@@ -47,6 +47,7 @@ impl NativeHttpServer {
         enable_openai = true,
         enable_anthropic = true,
         enable_demo = true,
+        api_key = None,
         distributed = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -59,6 +60,7 @@ impl NativeHttpServer {
         enable_openai: bool,
         enable_anthropic: bool,
         enable_demo: bool,
+        api_key: Option<String>,
         distributed: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         if stream_interval == 0 {
@@ -87,6 +89,14 @@ impl NativeHttpServer {
                 "enable_demo=True requires enable_openai=True",
             ));
         }
+        if api_key
+            .as_deref()
+            .is_some_and(|key| key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_graphic()))
+        {
+            return Err(PyValueError::new_err(
+                "api_key must be nonempty printable ASCII without whitespace",
+            ));
+        }
         Ok(Self {
             engine,
             distributed,
@@ -99,6 +109,7 @@ impl NativeHttpServer {
                 enable_anthropic,
                 enable_demo,
                 routed_dp_size,
+                api_key: api_key.map(Into::into),
             },
             running: AtomicBool::new(false),
             shutdown: Mutex::new(None),
@@ -125,7 +136,7 @@ impl NativeHttpServer {
         let distributed = self.distributed.as_ref().map(|value| value.clone_ref(py));
         let recipe = self.recipe.clone_ref(py);
         let model = self.model.clone();
-        let routes = self.routes;
+        let routes = self.routes.clone();
         let stream_interval = self.stream_interval;
         let request_queue_capacity = self.request_queue_capacity;
         let result = py.detach(move || {
@@ -256,7 +267,7 @@ fn run_server(
                 tokio::select! {
                     _ = actor_done => {},
                     _ = stopping.changed() => {},
-                    _ = tokio::signal::ctrl_c() => {},
+                    () = resin_http::shutdown_signal() => {},
                 }
             }
             stop_actor.send_replace(true);

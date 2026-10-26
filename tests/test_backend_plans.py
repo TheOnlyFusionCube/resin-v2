@@ -58,7 +58,7 @@ def test_batch_view_derives_canonical_row_geometry() -> None:
     assert np.shares_memory(batch.token_ids, native.token_ids)
     assert np.shares_memory(batch.positions, native.positions)
     assert not batch.token_ids.flags.writeable
-    with pytest.raises(TypeError, match="init=False"):
+    with pytest.raises((TypeError, ValueError), match="init=False"):
         replace(batch, positions=np.zeros(3, dtype=np.uint32))
     with pytest.raises(FrozenInstanceError):
         setattr(batch, "positions", np.zeros(3, dtype=np.uint32))

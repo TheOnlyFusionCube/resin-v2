@@ -906,3 +906,85 @@ async fn programmatic_shutdown_closes_the_listener() {
         .unwrap();
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
 }
+
+#[tokio::test]
+async fn api_key_guards_v1_routes_but_not_probes() {
+    let (jobs, mut receiver) = mpsc::channel::<GenerationJob>(32);
+    tokio::spawn(async move {
+        while let Some(job) = receiver.recv().await {
+            let _ = job.events.try_send(GenerationEvent::Finished {
+                reason: FinishReason::Stop,
+                input_tokens: 1,
+                cached_tokens: 0,
+                output_tokens: 1,
+                elapsed_ms: 1.0,
+                generation_elapsed_ms: 1.0,
+                time_to_first_token_ms: 1.0,
+            });
+        }
+    });
+    let app = router(
+        "test-model",
+        jobs,
+        RouteConfig {
+            api_key: Some("sk-test".into()),
+            ..RouteConfig::default()
+        },
+        None,
+    );
+    let get = |uri: &str, auth: Option<(&str, &str)>| {
+        let mut request = Request::get(uri);
+        if let Some((name, value)) = auth {
+            request = request.header(name, value);
+        }
+        request.body(Body::empty()).unwrap()
+    };
+
+    let (status, body) = json_response(app.clone(), get("/v1/models", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["type"], "authentication_error");
+    for wrong in [
+        ("authorization", "Bearer sk-wrong"),
+        ("authorization", "Bearer sk-tes"),
+        ("authorization", "sk-test"),
+        ("x-api-key", "sk-test2"),
+    ] {
+        let (status, _) = json_response(app.clone(), get("/v1/models", Some(wrong))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{wrong:?}");
+    }
+    for right in [
+        ("authorization", "Bearer sk-test"),
+        ("x-api-key", "sk-test"),
+    ] {
+        let (status, body) = json_response(app.clone(), get("/v1/models", Some(right))).await;
+        assert_eq!(status, StatusCode::OK, "{right:?}");
+        assert_eq!(body["data"][0]["id"], "test-model");
+    }
+
+    let message = |auth: Option<&str>| {
+        let mut request =
+            Request::post("/v1/messages").header(header::CONTENT_TYPE, "application/json");
+        if let Some(key) = auth {
+            request = request.header("x-api-key", key);
+        }
+        request
+            .body(Body::from(
+                json!({"model": "test-model", "max_tokens": 4, "messages": [{"role": "user", "content": "hi"}]})
+                    .to_string(),
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        json_response(app.clone(), message(None)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        json_response(app.clone(), message(Some("sk-test"))).await.0,
+        StatusCode::OK
+    );
+
+    let (status, _) = json_response(app.clone(), get("/health", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let response = app.oneshot(get("/", None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

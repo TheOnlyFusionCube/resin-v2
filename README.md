@@ -207,7 +207,13 @@ HTTP sessions (128 per replica), admissions before an inference step (4 per
 replica), and buffered events per client (64) remain bounded. A full intake
 queue returns HTTP 429; slow or disconnected clients are cancelled without
 blocking other requests. Actor failure stops the listener, and
-`HttpServer.shutdown()` requests shutdown after the current model step.
+`HttpServer.shutdown()`, Ctrl-C, or SIGTERM requests shutdown after the current
+model step.
+
+Pass `HttpServer(api_key=...)` to require `Authorization: Bearer <key>` or
+`x-api-key: <key>` on every `/v1` route. `/health`, `/metrics`, and the demo
+page stay unauthenticated for probes and scrapers; the demo page asks for the
+key when the API returns 401.
 
 ```bash
 # Run one LFM2 prompt in the terminal.
@@ -259,8 +265,9 @@ The chat demo renders Markdown and TeX math and requests up to 16,384 output
 tokens by default. Model loading, CUDA graph capture, and one real prompt
 warmup all complete before the endpoint starts accepting traffic.
 Because `requires_proxy_auth=False`, anyone with a URL can submit inference
-requests and incur GPU usage; remove the deployment when it is no longer
-needed.
+requests and incur GPU usage unless `RESIN_API_KEY` is set in the deploying
+shell; the key then becomes a Modal secret and every `/v1` route requires it.
+Remove the deployment when it is no longer needed.
 
 Select a native recipe by name and supply its tokenizer or multimodal processor.
 Messages and content blocks are Rust-owned typed objects:

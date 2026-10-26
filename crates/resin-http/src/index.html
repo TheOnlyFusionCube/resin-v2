@@ -118,7 +118,9 @@ const topP=document.querySelector('#top-p'),maxOutputTokens=document.querySelect
 const attach=document.querySelector('#attach'),imageInput=document.querySelector('#image-input'),attachments=document.querySelector('#attachments');
 const supportedImageTypes=new Set(['image/avif','image/bmp','image/gif','image/jpeg','image/png','image/tiff','image/webp']);
 const maxImages=4,maxImageBytes=8*1024*1024;let history=[],pendingImages=[];
-fetch('/v1/models').then(r=>r.json()).then(x=>modelEl.textContent=x.data?.[0]?.id||'');
+function storedApiKey(){try{return localStorage.getItem('resin-api-key')}catch{return null}}
+async function apiFetch(url,init={}){for(let attempt=0;;attempt++){const key=storedApiKey(),headers={...init.headers};if(key)headers.authorization=`Bearer ${key}`;const response=await fetch(url,{...init,headers});if(response.status!==401||attempt>0)return response;const entered=window.prompt('This server requires an API key:');if(!entered)return response;try{localStorage.setItem('resin-api-key',entered.trim())}catch{}}}
+apiFetch('/v1/models').then(r=>r.json()).then(x=>modelEl.textContent=x.data?.[0]?.id||'');
 function chatViewportBottom(){return window.innerHeight-footerEl.offsetHeight}
 function atChatBottom(){return chat.getBoundingClientRect().bottom-chatViewportBottom()<48}
 function scrollChat(follow=true){requestAnimationFrame(()=>{if(follow)window.scrollTo({top:window.scrollY+chat.getBoundingClientRect().bottom-chatViewportBottom()})})}
@@ -190,7 +192,7 @@ form.addEventListener('submit',async e=>{
   try {
     const request={model:modelEl.textContent,messages:history,temperature:Number(temperature.value),top_p:Number(topP.value),max_completion_tokens:Number(maxOutputTokens.value),stream:true,stream_options:{include_usage:true}};
     if(reasoningEffort.value)request.reasoning_effort=reasoningEffort.value;
-    const response=await fetch('/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(request)});
+    const response=await apiFetch('/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(request)});
     if(!response.ok)throw new Error((await response.json()).error?.message||response.statusText);
     pendingLabel='Preparing prompt';updatePending();
     const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',completed=false;
