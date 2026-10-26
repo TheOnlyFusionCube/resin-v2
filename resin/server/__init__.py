@@ -33,6 +33,10 @@ class HttpServer:
     request_queue_capacity bounds requests waiting for engine admission across
     all replicas. It does not change the engine's active batch size. A full
     queue returns HTTP 429 so clients can retry with backoff.
+
+    api_key, when set, makes every /v1 route require ``Authorization: Bearer
+    <key>`` or ``x-api-key: <key>``. /health, /metrics, and the demo page stay
+    open for probes and scrapers; the demo page asks for the key on HTTP 401.
     """
 
     def __init__(
@@ -46,6 +50,7 @@ class HttpServer:
         enable_openai: bool = True,
         enable_anthropic: bool = True,
         enable_demo: bool = True,
+        api_key: str | None = None,
     ) -> None:
         from resin.backend.distributed import (
             DistributedEngine,
@@ -82,6 +87,8 @@ class HttpServer:
                 raise ValueError("HTTP route flags must be booleans")
             if enable_demo and not enable_openai:
                 raise ValueError("enable_demo=True requires enable_openai=True")
+            if api_key is not None and not isinstance(api_key, str):
+                raise ValueError("api_key must be a string or None")
         except BaseException as exc:
             error = exc
         if isinstance(engine, DistributedEngine):
@@ -143,6 +150,7 @@ class HttpServer:
                     enable_openai=enable_openai,
                     enable_anthropic=enable_anthropic,
                     enable_demo=enable_demo,
+                    api_key=api_key,
                     distributed=self._coordinator,
                 )
         except BaseException as exc:
@@ -167,7 +175,7 @@ class HttpServer:
         return self._coordinator is not None and self._coordinator.running
 
     def serve(self, *, host: str = "127.0.0.1", port: int = 8000) -> None:
-        """Block while serving, until Ctrl-C or another thread calls shutdown."""
+        """Block while serving, until Ctrl-C, SIGTERM, or another thread calls shutdown."""
 
         try:
             if self._native is not None:

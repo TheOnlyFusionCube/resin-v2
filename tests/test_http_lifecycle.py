@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import signal
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import urllib.error
 import urllib.request
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 import pytest
 from output_helpers import forward_output
@@ -563,3 +568,79 @@ def test_admission_burst_yields_to_inference_before_draining_queue():
             recipe.resume.set()
             for connection in connections:
                 connection.close()
+
+
+def test_api_key_guards_inference_but_not_health():
+    with running_server(Runner(), api_key="sk-test") as (*_, base, _port):
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            post(base, request_body())
+        assert rejected.value.code == 401
+        assert rejected.value.headers["WWW-Authenticate"] == "Bearer"
+        request = urllib.request.Request(
+            f"{base}/v1/chat/completions",
+            data=request_body(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer sk-test",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+            assert json.load(response)["choices"][0]["message"]["content"]
+
+
+@pytest.mark.parametrize("api_key", ["", "has space", "line\nbreak", "ключ", 7])
+def test_http_server_rejects_invalid_api_keys(api_key):
+    engine = Engine(Runner())
+    with pytest.raises(ValueError, match="api_key"):
+        HttpServer(engine, recipe=Recipe(), model="test", api_key=api_key)
+    engine.close()
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGTERM") or sys.platform == "win32", reason="POSIX signals"
+)
+def test_sigterm_drains_server_and_exits_cleanly(tmp_path):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    script = tmp_path / "serve.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import sys
+            sys.path.insert(0, {str(Path(__file__).parent)!r})
+            from test_http_lifecycle import Recipe, Runner
+            from resin import Engine
+            from resin.server import HttpServer
+
+            engine = Engine(Runner())
+            HttpServer(engine, recipe=Recipe(), model="test").serve(port={port})
+            assert engine.closed
+            print("drained", flush=True)
+            """
+        )
+    )
+    child = subprocess.Popen(
+        [sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/health", timeout=0.2
+                ) as response:
+                    assert response.status == 200
+                    break
+            except (OSError, urllib.error.URLError):
+                assert child.poll() is None, child.communicate()
+                assert time.monotonic() < deadline, "server did not become ready"
+                time.sleep(0.05)
+        child.send_signal(signal.SIGTERM)
+        stdout, stderr = child.communicate(timeout=15)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    assert child.returncode == 0, stderr.decode()
+    assert stdout.decode().strip() == "drained"

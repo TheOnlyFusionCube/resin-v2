@@ -1449,6 +1449,7 @@ class _HttpServer:
         enable_openai: bool = True,
         enable_anthropic: bool = True,
         enable_demo: bool = True,
+        api_key: str | None = None,
         distributed: Any | None = None,
     ) -> _HttpServer: ...
     def __repr__(self, /) -> str: ...

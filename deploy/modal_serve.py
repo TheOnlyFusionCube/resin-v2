@@ -3,6 +3,7 @@
 Download: RESIN_MODEL=deepseek-v41 uv run modal run deploy/modal_serve.py
 Serve:    RESIN_MODEL=deepseek-v41 uv run modal deploy deploy/modal_serve.py
 Each selection has its own app/endpoint; adding a model requires a registry entry.
+Set RESIN_API_KEY when deploying to require that key on every /v1 route.
 """
 
 from __future__ import annotations
@@ -49,6 +50,13 @@ image = build_modal_image(
 )
 app = modal.App(MODEL.app_name or f"resin-{MODEL.label}", image=image, volumes=volumes)
 _http_server_processes: list[object] = []
+# Deploy-time RESIN_API_KEY becomes a container secret; without it the
+# endpoint stays open to anyone with the URL.
+api_key_secrets = (
+    [modal.Secret.from_dict({"RESIN_API_KEY": os.environ["RESIN_API_KEY"]})]
+    if os.environ.get("RESIN_API_KEY")
+    else []
+)
 
 
 @app.function(cpu=16, memory=32 * 1024, timeout=24 * 60 * 60)
@@ -179,6 +187,7 @@ def _serve_rank(rank: int, port: int, model: str) -> None:
             recipe=recipe,
             model=spec.repo_id,
             enable_anthropic=spec.enable_anthropic,
+            api_key=os.environ.get("RESIN_API_KEY") or None,
         ).serve(host="0.0.0.0", port=8000)
     finally:
         if not engine.closed:
@@ -195,6 +204,7 @@ def _serve_rank(rank: int, port: int, model: str) -> None:
     startup_timeout=60 * 60,
     scaledown_window=15 * 60,
     max_containers=1,
+    secrets=api_key_secrets,
 )
 @modal.concurrent(
     max_inputs=MODEL.max_batch_size * MODEL.attn_dp,
